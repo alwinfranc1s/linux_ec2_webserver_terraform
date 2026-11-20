@@ -12,7 +12,17 @@ terraform {
 variable "aws_region" {
   description = "AWS region to deploy the web server in."
   type        = string
-  default     = "us-east-1"
+  default     = "ap-south-1"
+}
+
+variable "public_route_table_id" {
+  description = "ID of the approved existing public route table. Its VPC hosts the new subnet."
+  type        = string
+}
+
+variable "subnet_cidr_block" {
+  description = "Unused IPv4 CIDR within the existing VPC, approved for the new subnet."
+  type        = string
 }
 
 provider "aws" {
@@ -23,43 +33,36 @@ data "aws_ssm_parameter" "amazon_linux" {
   name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 }
 
-resource "aws_vpc" "web" {
-  cidr_block           = "10.0.0.0/16"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-
-  tags = { Name = "terraform-web-vpc" }
+data "aws_route_table" "public" {
+  route_table_id = var.public_route_table_id
 }
 
 resource "aws_subnet" "web" {
-  vpc_id     = aws_vpc.web.id
-  cidr_block = "10.0.1.0/24"
+  vpc_id     = data.aws_route_table.public.vpc_id
+  cidr_block = var.subnet_cidr_block
 
   tags = { Name = "terraform-web-public-subnet" }
 }
 
-resource "aws_internet_gateway" "web" {
-  vpc_id = aws_vpc.web.id
-}
-
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.web.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.web.id
-  }
-}
-
 resource "aws_route_table_association" "web" {
   subnet_id      = aws_subnet.web.id
-  route_table_id = aws_route_table.public.id
+  route_table_id = data.aws_route_table.public.id
+
+  lifecycle {
+    precondition {
+      condition = anytrue([
+        for route in data.aws_route_table.public.routes :
+        route.cidr_block == "0.0.0.0/0" && try(startswith(route.gateway_id, "igw-"), false)
+      ])
+      error_message = "The existing route table must have an IPv4 default route (0.0.0.0/0) to an internet gateway."
+    }
+  }
 }
 
 resource "aws_security_group" "web" {
   name        = "terraform-web-http"
   description = "Allow public HTTP and outbound HTTPS for package downloads"
-  vpc_id      = aws_vpc.web.id
+  vpc_id      = data.aws_route_table.public.vpc_id
 
   ingress {
     from_port   = 80
